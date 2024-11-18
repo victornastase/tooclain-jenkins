@@ -1,0 +1,226 @@
+@Library('pfPipeline@tags/4') _
+
+if (BRANCH_NAME == "develop") {
+	defaultDeploySql = true
+}
+
+pipeline {
+
+    agent {
+        label 'java'
+    }
+
+    options {
+        // the gitlab connection to use with admpico token
+        gitLabConnection('gitlab-dogen.group.echonet/market-place/')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '5', artifactNumToKeepStr: '5'))
+        timeout(time: 1, unit: 'HOURS')
+        // adds support for standard ANSI escape sequences, including color, to Console Output.
+        ansiColor('xterm')
+    }
+
+    triggers {
+        gitlab(triggerOnPush: true, branchFilterType: 'All')
+    }
+
+    environment {
+        DB_HOST = 's02vl1234567'
+        DB_PORT = 1521
+        DB_INSTANCE = 'ORACLE_INSTANCE'
+        DOCKER_IMAGE = 'docker-registry.pico-pfc.dev.echonet/bnpp-pf/liquibase:upgrade-4.3.4'
+        DB_OWN_USER = 'OWN_USER_DB'
+        DB_OWN_PASSWORD = 'password'
+        DB_APL_USER = 'APL_USER_DB'
+        DB_APL_PASSWORD = '1234'
+        DB_SERVICE = 'MY_ORACLE_DD'
+        DB_EXECUTE = 'sqlplus'
+        DB_CONNECT = 'OWN_USER_DB/MY_ORACLE_DB@(DESCRIPTION=(CONNECT_TIMEOUT=10)(RETRY_COUNT=3)(RETRY_DELAY=5)(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=example.fr.net.intra)(PORT=1521)))(CONNECT_DATA=(SERVICE_NAME=MY_ORACLE_DB)(SERVER=DEDICATED)(FAILOVER_MODE=(TYPE=SELECT)(METHOD=BASIC)(RETRIES=10)(DELAY=5)))))'
+        LB_EXECDIR = 'my-project/src/main/resources/'
+        LB_MCHANGE = 'db/changelog/schema/changelog-master.yaml'
+    }
+
+    parameters {
+        //liquibase action
+        booleanParam(name: "REMOVESQLLOCKS", description: "Perform Liquibase ReleaseLocks on DB.", defaultValue: false)
+        booleanParam(name: "DEPLOYSQLPVIEW", description: "Perform SQL delivery Previous on DB.", defaultValue: false)
+        booleanParam(name: "DEPLOYSQL", description: "Perform SQL delivery on DB.", defaultValue: false)
+        booleanParam(name: "ROLLBACKSQL", description: "Perform SQL delivery Rollback on DB.", defaultValue: false)
+        choice(name: "ROLLBACK", choices: ['none', 'rollback', 'rollbackSQL', 'rollbackCount', 'rollbackCountSQL', 'rollbackToDate', 'RollbackToDateSQL'], description: 'Select the Liquibase Rollback')
+        string(name: "ROLLMODE", defaultValue: ' version_1.0', description: 'Rollback precision')
+        //Build
+        choice(name: "FRONTBUILDMODE", choices: ['build-ci', 'build'], description: 'Select the build mode, build-ci for full build, build for avoiding tests')
+        choice(name: "BACKBUILDMODE", choices: ['-U', '-U -Dmaven.test.skip=true'], description: 'Select the build mode, -U for full build, -Dmaven.test.skip=true for avoiding tests')
+        booleanParam(name: "RELEASE", description: "Build a release from current commit.", defaultValue: false)
+        booleanParam(name: "DEPLOY_BRANCH", description: "CHECK TO DEPLOY THIS BRANCH INTO DEV", defaultValue: false)
+        choice(name: "DEPLOY_PROFILE", choices: ['dvlp', 'test','housseyn', 'valentina'], description: 'Select the deploy profile for DEV environment')
+        booleanParam(name: "PROTOCOL_HTTPS", description: 'Select the protocol for DEV environment', defaultValue: true)
+        booleanParam(name: "QUALITY", description: "To bypass quality gate checks", defaultValue: false)
+    }
+    stages {
+        stage('release') {
+            when {
+                expression {
+                    params.RELEASE
+                }
+            }
+            steps {
+                pfMvnRelease(pomLocation: 'pom.xml', prepareArguments: '-U', performArguments: "-U")
+            }
+        }
+
+        //to reset liquibase lock when you have a previous failed deployment
+        stage('SQL ReleaseLocks') {
+            when {
+                expression {
+                    params.REMOVESQLLOCKS
+                }
+            }
+            steps {
+                pfSqlDeployOracle(
+                    action: "releaseLocks",
+                    host: "${DB_HOST}",
+                    port: "${DB_PORT}",
+                    instance: "${DB_INSTANCE}",
+                    service: "${DB_SERVICE}",
+                    user: "${DB_OWN_USER}",
+                    password: "${DB_OWN_PASSWORD}",
+                    userApp: "${DB_APL_USER}",
+                    passwordApp: "${DB_APL_PASSWORD}",
+                    execDirectory: "${LB_EXECDIR}",
+                    changelog: "${LB_MCHANGE}",
+                    image: "${DOCKER_IMAGE}",
+                    executecommand: "${DB_EXECUTE}",
+                    connectsqlplus: "${DB_CONNECT}"
+                )
+            }
+        }
+
+        //to show the SQL script to be applied by liquibase on DB
+        stage('SQL Deploy Preview') {
+            when {
+                expression {
+                    params.DEPLOYSQLPVIEW
+                }
+            }
+            steps {
+                pfSqlDeployOracle(
+                    action: "updateSQL",
+                    host: "${DB_HOST}",
+                    port: "${DB_PORT}",
+                    instance: "${DB_INSTANCE}",
+                    service: "${DB_SERVICE}",
+                    user: "${DB_OWN_USER}",
+                    password: "${DB_OWN_PASSWORD}",
+                    userApp: "${DB_APL_USER}",
+                    passwordApp: "${DB_APL_PASSWORD}",
+                    execDirectory: "${LB_EXECDIR}",
+                    changelog: "${LB_MCHANGE}",
+                    image: "${DOCKER_IMAGE}",
+                    executecommand: "${DB_EXECUTE}",
+                    connectsqlplus: "${DB_CONNECT}"
+                )
+            }
+        }
+
+        //to perform the effective SQL migration on DB target
+        stage('SQL Deploy') {
+            when {
+                expression {
+                    params.DEPLOYSQL
+                }
+            }
+            steps {
+                pfSqlDeployOracle(
+                    action: "update",
+                    host: "${DB_HOST}",
+                    port: "${DB_PORT}",
+                    instance: "${DB_INSTANCE}",
+                    service: "${DB_SERVICE}",
+                    user: "${DB_OWN_USER}",
+                    password: "${DB_OWN_PASSWORD}",
+                    userApp: "${DB_APL_USER}",
+                    passwordApp: "${DB_APL_PASSWORD}",
+                    execDirectory: "${LB_EXECDIR}",
+                    changelog: "${LB_MCHANGE}",
+                    image: "${DOCKER_IMAGE}",
+                    executecommand: "${DB_EXECUTE}",
+                    connectsqlplus: "${DB_CONNECT}"
+                )
+            }
+        }
+
+        //to perform SQL rollback defined in Liquibase
+        stage('SQL Rollback') {
+            when {
+                expression {
+                    params.ROLLBACKSQL
+                }
+            }
+            steps {
+                pfSqlDeployOracle(
+                    action: "${params.ROLLBACK} ${params.ROLLMODE}",
+                    host: "${DB_HOST}",
+                    port: "${DB_PORT}",
+                    instance: "${DB_INSTANCE}",
+                    service: "${DB_SERVICE}",
+                    user: "${DB_OWN_USER}",
+                    password: "${DB_OWN_PASSWORD}",
+                    userApp: "${DB_APL_USER}",
+                    passwordApp: "${DB_APL_PASSWORD}",
+                    execDirectory: "${LB_EXECDIR}",
+                    changelog: "${LB_MCHANGE}",
+                    image: "${DOCKER_IMAGE}",
+                    executecommand: "${DB_EXECUTE}",
+                    connectsqlplus: "${DB_CONNECT}"
+                )
+            }
+        }
+
+        stage('build') {
+            when {
+                expression {
+                    !params.RELEASE
+                }
+            }
+            steps {
+                pfMvnBuild(options: "${params.BACKBUILDMODE}")
+            }
+        }
+
+        stage('deploy') {
+            when {
+                expression {
+                    params.DEPLOY_BRANCH
+                }
+            }
+            steps {
+                pfWlb(
+                    host: 'devbackdili1',
+                    name: 'diligense-api',
+                    ihsPort: "${deploy_profiles[params.DEPLOY_PROFILE].port}",
+                    https: "${params.PROTOCOL_HTTPS}",
+                    codeAP: '07388',
+                    code5car: 'dili0',
+                    libelle: "${deploy_profiles[params.DEPLOY_PROFILE].libelle}",
+                    deliverable: '**/target/*.war'
+                )
+            }
+        }
+
+        stage('quality gate') {
+            when {
+                expression {
+                    params.QUALITY
+                }
+            }
+            steps {
+                pfIQServerAnalysis (
+                    iqApplication: readMavenPom().getArtifactId(),
+                    iqStage: 'build'
+                )
+            }
+        }
+    }
+
+}
